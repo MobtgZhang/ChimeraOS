@@ -66,6 +66,40 @@ zig build run
 ./scripts/run.sh --arch loong64
 ```
 
+### LoongArch64 特别说明
+
+LoongArch64 目标使用 freestanding ELF 格式（Zig 的 PE/COFF 链接器暂不支持 LoongArch UEFI），
+通过 QEMU `-kernel` 参数直接加载内核。运行时需要 LoongArch UEFI 固件：
+
+```bash
+# 克隆龙芯固件仓库（包含 QEMU virt、2K3000、3A5000、3A6000 固件）
+git clone https://github.com/loongson/Firmware /path/to/Firmware
+
+# 使用固件仓库运行（自动检测固件位置）
+FIRMWARE_DIR=/path/to/Firmware ./scripts/run.sh --arch loong64
+
+# 指定目标硬件型号（影响日志输出，QEMU 均使用 virt 机器模拟）
+./scripts/run.sh --arch loong64 --loong-machine 3a5000
+./scripts/run.sh --arch loong64 --loong-machine 3a6000
+./scripts/run.sh --arch loong64 --loong-machine 2k3000
+
+# 调整内存大小
+./scripts/run.sh --arch loong64 --memory 1G
+
+# 调试模式（GDB 远程调试）
+./scripts/run.sh --arch loong64 --debug
+# 然后在另一个终端：gdb-multiarch -ex "target remote :1234"
+```
+
+**支持的龙芯硬件固件（位于 Firmware 仓库）：**
+
+| 系列 | 代表型号 | 固件路径 |
+|------|---------|---------|
+| 2K3000 | XB6MXC0 | `2K3000_Series/PC/XB6MXC0/` |
+| 3A5000 | 3A5000-7A2000-EVB, ML5A, A2101 等 | `5000Series/PC/` |
+| 3A6000 | XA61200, XA612A0, XA612B0 等 | `6000Series/PC/` |
+| QEMU virt | - | `LoongArchVirtMachine/` |
+
 更多构建选项见 `zig build --help`。
 
 ## 目录结构
@@ -74,7 +108,8 @@ zig build run
 ChimeraOS/
 ├── build.zig / build.zig.zon    # 多架构构建系统
 ├── src/
-│   ├── main.zig                 # UEFI 引导入口（跨架构）
+│   ├── main.zig                 # UEFI 引导入口（x86_64/aarch64）
+│   ├── main_loong64.zig         # LoongArch64 freestanding 入口
 │   ├── kernel/
 │   │   ├── main.zig             # 内核主入口与初始化流程
 │   │   ├── arch/
@@ -82,7 +117,7 @@ ChimeraOS/
 │   │   │   ├── x86_64/          # x86_64: GDT, IDT, PIC, Serial, Paging, Ports, HAL
 │   │   │   ├── aarch64/         # ARM64: PL011 UART, GICv2, MMU, HAL
 │   │   │   ├── riscv64/         # RISC-V: 16550 UART, PLIC, Sv48 MMU, HAL
-│   │   │   ├── loong64/         # LoongArch: UART, EIOINTC, MMU, HAL
+│   │   │   ├── loong64/         # LoongArch: UART, CSR, EIOINTC, DMW/TLB, HAL
 │   │   │   └── mips64el/        # MIPS64: UART, CP0 IRQ, TLB, HAL
 │   │   ├── mach/                # Mach 子系统：Port, Message, Task, Thread, Clock, VM
 │   │   ├── bsd/                 # BSD 层：Syscall, Proc, Signal, VFS, DevFS
@@ -144,8 +179,8 @@ PL011 UART、GICv2 中断控制器、ARM Generic Timer、4 级页表
 ### riscv64（基础）
 16550 UART、PLIC 中断控制器、SBI 定时器、Sv48 页表
 
-### loong64（基础）
-16550 UART、EIOINTC 中断控制器、Stable Counter 定时器、多级页表
+### loong64（功能完善）
+16550 UART（0x1FE001E0，兼容 QEMU virt / 2K3000 / 3A5000 / 3A6000）、CSR 控制状态寄存器全支持、EIOINTC 中断控制器、Stable Counter 定时器（100 Hz）、DMW 直接映射窗口（cached/uncached）、STLB/MTLB TLB 管理
 
 ### mips64el（实验性）
 16550 UART、CP0 中断控制器、CP0 Count/Compare 定时器、软件 TLB
@@ -155,7 +190,7 @@ PL011 UART、GICv2 中断控制器、ARM Generic Timer、4 级页表
 - **x86_64**：✅ 完整支持（UEFI 启动、双缓冲桌面、全部驱动）
 - **aarch64**：🔧 HAL + 串口 + 中断控制器 + MMU 桩
 - **riscv64**：🔧 HAL + 串口 + PLIC + MMU 桩
-- **loong64**：🔧 HAL + 串口 + 中断控制器 + MMU 桩
+- **loong64**：🔧 HAL + 串口 + CSR + EIOINTC + Stable Counter + DMW/TLB（支持 QEMU virt / 2K3000 / 3A5000 / 3A6000）
 - **mips64el**：⚠️ HAL 桩（UEFI 非官方支持）
 
 ## 许可

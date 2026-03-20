@@ -1,5 +1,4 @@
 const std = @import("std");
-const uefi = std.os.uefi;
 const builtin = @import("builtin");
 
 // ── Architecture (selected at compile time) ───────────────
@@ -71,9 +70,25 @@ pub const FramebufferInfo = struct {
     bpp: u32,
 };
 
+pub const MemoryRegionKind = enum {
+    usable,
+    reserved,
+    acpi_reclaimable,
+    bootloader_reclaimable,
+};
+
+pub const MemoryRegion = struct {
+    base: u64,
+    length: u64,
+    kind: MemoryRegionKind,
+};
+
+pub const MAX_MEMORY_REGIONS: usize = 256;
+
 pub const BootInfo = struct {
     framebuffer: ?FramebufferInfo,
-    memory_map: uefi.tables.MemoryMapSlice,
+    memory_regions: [*]const MemoryRegion,
+    memory_region_count: usize,
 };
 
 // ── Kernel Entry Point ────────────────────────────────────
@@ -93,7 +108,7 @@ pub fn kernelMain(boot_info: *const BootInfo) noreturn {
     arch.cpuInit();
 
     // ── Phase 2: Physical memory ──────────────────────────
-    pmm.init(boot_info.memory_map);
+    pmm.init(boot_info.memory_regions[0..boot_info.memory_region_count]);
     log.info("[MEM]  PMM: {} pages free ({} MB)", .{
         pmm.freePageCount(),
         pmm.freePageCount() * 4096 / (1024 * 1024),

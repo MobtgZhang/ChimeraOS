@@ -219,8 +219,16 @@ fn alignDown(val: u64, alignment: u64) u64 {
 
 // ── Kernel VM map singleton ───────────────────────────────
 
-const KERNEL_VM_BASE: u64 = 0xFFFF_8000_0000_0000;
-const KERNEL_VM_TOP: u64 = 0xFFFF_FFFF_FFFF_0000;
+const KERNEL_VM_BASE: u64 = switch (builtin.cpu.arch) {
+    .loongarch64 => 0x9000_0000_0000_0000,
+    .aarch64 => 0xFFFF_0000_0000_0000,
+    else => 0xFFFF_8000_0000_0000,
+};
+const KERNEL_VM_TOP: u64 = switch (builtin.cpu.arch) {
+    .loongarch64 => 0x9000_FFFF_FFFF_0000,
+    .aarch64 => 0xFFFF_FFFF_FFFF_0000,
+    else => 0xFFFF_FFFF_FFFF_0000,
+};
 
 var kernel_map: VMMap = VMMap.init(KERNEL_VM_BASE, KERNEL_VM_TOP);
 

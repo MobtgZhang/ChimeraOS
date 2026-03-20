@@ -1,7 +1,6 @@
-const std = @import("std");
-const uefi = std.os.uefi;
 const log = @import("../../lib/log.zig");
 const SpinLock = @import("../../lib/spinlock.zig").SpinLock;
+const MemoryRegion = @import("../main.zig").MemoryRegion;
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -11,49 +10,38 @@ var total_pages: usize = 0;
 var used_pages: usize = 0;
 var lock: SpinLock = .{};
 
-pub fn init(memory_map: uefi.tables.MemoryMapSlice) void {
+pub fn init(regions: []const MemoryRegion) void {
     // Pass 1: find the highest physical address to determine bitmap size
     var max_addr: u64 = 0;
-    {
-        var iter = memory_map.iterator();
-        while (iter.next()) |desc| {
-            const end = desc.physical_start + desc.number_of_pages * PAGE_SIZE;
-            if (end > max_addr) max_addr = end;
-        }
+    for (regions) |r| {
+        const end = r.base + r.length;
+        if (end > max_addr) max_addr = end;
     }
 
     total_pages = @intCast(max_addr / PAGE_SIZE);
     bitmap_size = (total_pages + 7) / 8;
     used_pages = total_pages;
 
-    // Pass 2: find a suitable conventional memory region for the bitmap
-    {
-        var iter = memory_map.iterator();
-        while (iter.next()) |desc| {
-            if (desc.type == .conventional_memory and
-                desc.number_of_pages * PAGE_SIZE >= bitmap_size)
-            {
-                bitmap = @ptrFromInt(desc.physical_start);
-                break;
-            }
+    // Pass 2: find a suitable usable memory region for the bitmap
+    for (regions) |r| {
+        if (r.kind == .usable and r.length >= bitmap_size) {
+            bitmap = @ptrFromInt(r.base);
+            break;
         }
     }
 
     // Mark all pages as used
     @memset(bitmap[0..bitmap_size], 0xFF);
 
-    // Pass 3: free pages in conventional memory regions
-    {
-        var iter = memory_map.iterator();
-        while (iter.next()) |desc| {
-            if (desc.type == .conventional_memory) {
-                const start_page: usize = @intCast(desc.physical_start / PAGE_SIZE);
-                const count: usize = @intCast(desc.number_of_pages);
-                var i: usize = 0;
-                while (i < count) : (i += 1) {
-                    clearBit(start_page + i);
-                    used_pages -= 1;
-                }
+    // Pass 3: free pages in usable memory regions
+    for (regions) |r| {
+        if (r.kind == .usable) {
+            const start_page: usize = @intCast(r.base / PAGE_SIZE);
+            const count: usize = @intCast(r.length / PAGE_SIZE);
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                clearBit(start_page + i);
+                used_pages -= 1;
             }
         }
     }
@@ -69,7 +57,7 @@ pub fn init(memory_map: uefi.tables.MemoryMapSlice) void {
         }
     }
 
-    // Always reserve first 1MB (256 pages) for legacy hardware
+    // Reserve first 1MB (256 pages) for legacy hardware / firmware
     i = 0;
     while (i < 256 and i < total_pages) : (i += 1) {
         if (!testBit(i)) {

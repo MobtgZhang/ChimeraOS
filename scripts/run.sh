@@ -12,6 +12,8 @@ EXTRA_ARGS=()
 AUTO_BUILD=true
 GDB_SERVER=false
 MONITOR=false
+LOONG_MACHINE="virt"  # virt | 2k3000 | 3a5000 | 3a6000
+FIRMWARE_DIR="${FIRMWARE_DIR:-/home/mobtgzhang/Firmware}"
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -20,6 +22,8 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --arch ARCH      Target architecture: x86_64 (default), aarch64, riscv64, loong64, mips64el"
+    echo "  --loong-machine  LoongArch machine type: virt (default), 2k3000, 3a5000, 3a6000"
+    echo "  --firmware-dir   Path to Loongson Firmware repository (default: /home/mobtgzhang/Firmware)"
     echo "  --no-build       Skip automatic rebuild before running"
     echo "  --memory SIZE    Set guest memory (default: 256M)"
     echo "  --headless       Run without graphical display"
@@ -31,14 +35,16 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --arch)       ARCH="$2"; shift 2 ;;
-        --no-build)   AUTO_BUILD=false; shift ;;
-        --memory)     MEMORY="$2"; shift 2 ;;
-        --headless)   DISPLAY_OPT="-display none"; shift ;;
-        --debug)      GDB_SERVER=true; shift ;;
-        --monitor)    MONITOR=true; shift ;;
-        -h|--help)    usage ;;
-        *)            EXTRA_ARGS+=("$1"); shift ;;
+        --arch)           ARCH="$2"; shift 2 ;;
+        --loong-machine)  LOONG_MACHINE="$2"; shift 2 ;;
+        --firmware-dir)   FIRMWARE_DIR="$2"; shift 2 ;;
+        --no-build)       AUTO_BUILD=false; shift ;;
+        --memory)         MEMORY="$2"; shift 2 ;;
+        --headless)       DISPLAY_OPT="-display none"; shift ;;
+        --debug)          GDB_SERVER=true; shift ;;
+        --monitor)        MONITOR=true; shift ;;
+        -h|--help)        usage ;;
+        *)                EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
 
@@ -74,9 +80,23 @@ case "$ARCH" in
         ;;
 esac
 
-EFI_BIN="$BUILD_DIR/bin/${EFI_NAME}.efi"
+# Determine EFI binary path.  LoongArch64 builds as freestanding ELF then
+# converts to PE/COFF (.efi) via objcopy in the build step.
+case "$ARCH" in
+    riscv64|mips64el)
+        EFI_BIN="$BUILD_DIR/bin/${EFI_NAME}"
+        ;;
+    *)
+        EFI_BIN="$BUILD_DIR/bin/${EFI_NAME}.efi"
+        ;;
+esac
 
 cd "$PROJECT_DIR"
+
+# LoongArch QEMU virt machine requires at least 1G RAM
+if [ "$ARCH" = "loong64" ] && [ "$MEMORY" = "256M" ]; then
+    MEMORY="1G"
+fi
 
 # Auto-build
 if $AUTO_BUILD; then
@@ -247,19 +267,119 @@ case "$ARCH" in
         ;;
 
     loong64)
-        echo "  Firmware  : default (QEMU built-in)"
+        # Locate LoongArch UEFI firmware for QEMU virt machine
+        LOONG_EFI=""
+        LOONG_VARS=""
+
+        LOONG_FW_CANDIDATES=(
+            "$FIRMWARE_DIR/LoongArchVirtMachine/QEMU_EFI.fd:$FIRMWARE_DIR/LoongArchVirtMachine/QEMU_VARS.fd"
+            "/usr/share/edk2/loongarch64/QEMU_EFI.fd:/usr/share/edk2/loongarch64/QEMU_VARS.fd"
+            "/usr/share/qemu/edk2-loongarch64-code.fd:/usr/share/qemu/edk2-loongarch64-vars.fd"
+        )
+
+        for pair in "${LOONG_FW_CANDIDATES[@]}"; do
+            efi="${pair%%:*}"
+            vars="${pair##*:}"
+            if [ -f "$efi" ]; then
+                LOONG_EFI="$efi"
+                [ -f "$vars" ] && LOONG_VARS="$vars"
+                break
+            fi
+        done
+
+        if [ -z "$LOONG_EFI" ]; then
+            echo "[QEMU] WARNING: LoongArch UEFI firmware not found, using QEMU built-in."
+            echo "       For best results, clone https://github.com/loongson/Firmware"
+            echo "       or set FIRMWARE_DIR to the firmware repository path."
+            LOONG_EFI="default"
+        fi
+
+        echo "  Firmware  : $LOONG_EFI"
+        echo "  Machine   : $LOONG_MACHINE"
+
+        # Create a GPT ESP disk image for UEFI boot using mtools (no root needed).
+        # UEFI firmware discovers \EFI\BOOT\BOOTLOONGARCH64.EFI on the ESP.
+        LOONG_ESP_IMG="$BUILD_DIR/loong_esp.img"
+        if [ -f "$EFI_BIN" ]; then
+            echo "[QEMU] Creating UEFI ESP disk image..."
+            PART_START_SECTOR=2048
+            PART_END_SECTOR=131038
+            PART_SECTORS=$((PART_END_SECTOR - PART_START_SECTOR + 1))
+            PART_OFFSET=$((PART_START_SECTOR * 512))
+
+            truncate -s 64M "$LOONG_ESP_IMG"
+            sgdisk --clear \
+                --new=1:${PART_START_SECTOR}:${PART_END_SECTOR} \
+                --typecode=1:ef00 \
+                --change-name=1:ESP \
+                "$LOONG_ESP_IMG" >/dev/null 2>&1
+
+            mformat -i "${LOONG_ESP_IMG}@@${PART_OFFSET}" -F -T "$PART_SECTORS" ::
+            mmd -i "${LOONG_ESP_IMG}@@${PART_OFFSET}" ::/EFI
+            mmd -i "${LOONG_ESP_IMG}@@${PART_OFFSET}" ::/EFI/BOOT
+            mcopy -i "${LOONG_ESP_IMG}@@${PART_OFFSET}" \
+                "$EFI_BIN" ::/EFI/BOOT/BOOTLOONGARCH64.EFI
+
+            # startup.nsh auto-launches the kernel from EFI shell
+            STARTUP_NSH=$(mktemp)
+            echo 'FS0:\EFI\BOOT\BOOTLOONGARCH64.EFI' > "$STARTUP_NSH"
+            mcopy -i "${LOONG_ESP_IMG}@@${PART_OFFSET}" "$STARTUP_NSH" ::/startup.nsh
+            rm -f "$STARTUP_NSH"
+
+            echo "  ESP Image : $LOONG_ESP_IMG"
+        fi
 
         QEMU_ARGS=(
             "$QEMU_BIN"
             -machine virt
+            -cpu la464
+            -smp 4
             -net none
-            -drive "format=raw,file=fat:rw:$BUILD_DIR"
             -m "$MEMORY"
             -serial stdio
             -no-reboot
             -no-shutdown
-            -bios default
         )
+
+        # LoongArch QEMU virt machine only supports -bios, not pflash.
+        if [ "$LOONG_EFI" != "default" ]; then
+            QEMU_ARGS+=(-bios "$LOONG_EFI")
+            echo "  FW Mode   : bios"
+        else
+            QEMU_ARGS+=(-bios default)
+        fi
+
+        # Attach ESP disk image for UEFI boot discovery
+        if [ -f "$LOONG_ESP_IMG" ]; then
+            QEMU_ARGS+=(
+                -drive "file=$LOONG_ESP_IMG,format=raw,if=virtio"
+            )
+        fi
+
+        # Add display and input devices for LoongArch virt.
+        # Use virtio-vga (not virtio-gpu-pci) to get a direct linear
+        # framebuffer via UEFI GOP instead of BLT-only mode.
+        QEMU_ARGS+=(
+            -device virtio-vga
+            -device nec-usb-xhci,id=xhci,addr=0x1b
+            -device usb-tablet,id=tablet,bus=xhci.0,port=1
+            -device usb-kbd,id=keyboard,bus=xhci.0,port=2
+        )
+
+        case "$LOONG_MACHINE" in
+            2k3000)
+                echo "  Target HW : Loongson 2K3000 (QEMU virt emulation)"
+                ;;
+            3a5000)
+                echo "  Target HW : Loongson 3A5000 + 7A1000/7A2000 (QEMU virt emulation)"
+                ;;
+            3a6000)
+                echo "  Target HW : Loongson 3A6000 + 7A2000 (QEMU virt emulation)"
+                ;;
+            virt|*)
+                echo "  Target HW : QEMU loongarch64 virt (generic)"
+                ;;
+        esac
         ;;
 
     mips64el)

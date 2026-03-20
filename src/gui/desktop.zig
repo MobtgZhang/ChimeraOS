@@ -51,10 +51,12 @@ pub fn render() void {
 }
 
 pub fn drawCursor(mx: i32, my: i32) void {
+    if (!initialized) return;
     cursor.draw(mx, my);
 }
 
 pub fn presentFrame() void {
+    if (!initialized) return;
     graphics.swapBuffers();
 }
 
@@ -168,6 +170,7 @@ pub fn tick() void {
 }
 
 pub fn needsRedraw() bool {
+    if (!initialized) return false;
     return needs_redraw;
 }
 

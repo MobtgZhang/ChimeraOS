@@ -8,6 +8,8 @@ fn puts(con_out: *uefi.protocol.SimpleTextOutput, comptime msg: []const u8) void
     _ = con_out.outputString(std.unicode.utf8ToUtf16LeStringLiteral(msg)) catch {};
 }
 
+var memory_regions: [kernel.MAX_MEMORY_REGIONS]kernel.MemoryRegion = undefined;
+
 pub fn main() void {
     const con_out = uefi.system_table.con_out orelse return;
     const boot_services = uefi.system_table.boot_services orelse return;
@@ -65,9 +67,31 @@ pub fn main() void {
 
     // *** UEFI Boot Services are gone. We own the machine. ***
 
+    // Convert UEFI memory map to generic MemoryRegion array
+    var region_count: usize = 0;
+    {
+        var iter = mmap.iterator();
+        while (iter.next()) |desc| {
+            if (region_count >= kernel.MAX_MEMORY_REGIONS) break;
+            memory_regions[region_count] = .{
+                .base = desc.physical_start,
+                .length = desc.number_of_pages * 4096,
+                .kind = switch (desc.type) {
+                    .conventional_memory => .usable,
+                    .boot_services_code, .boot_services_data => .bootloader_reclaimable,
+                    .loader_code, .loader_data => .bootloader_reclaimable,
+                    .acpi_reclaim_memory => .acpi_reclaimable,
+                    else => .reserved,
+                },
+            };
+            region_count += 1;
+        }
+    }
+
     const boot_info = kernel.BootInfo{
         .framebuffer = fb_info,
-        .memory_map = mmap,
+        .memory_regions = &memory_regions,
+        .memory_region_count = region_count,
     };
     kernel.kernelMain(&boot_info);
 }
