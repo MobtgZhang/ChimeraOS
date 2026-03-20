@@ -61,4 +61,4 @@ ChimeraOS/
 
 ## 许可
 
-请参见仓库根目录的许可证文件（如有）。
+LGPL-2.1 license 
