@@ -7,7 +7,15 @@ const proc_mod = @import("proc.zig");
 const signal_mod = @import("signal.zig");
 const vnode_mod = @import("vfs/vnode.zig");
 const devfs_mod = @import("vfs/devfs.zig");
-const serial = @import("../arch/x86_64/serial.zig");
+const builtin = @import("builtin");
+const serial = switch (builtin.cpu.arch) {
+    .x86_64 => @import("../arch/x86_64/serial.zig"),
+    .aarch64 => @import("../arch/aarch64/serial.zig"),
+    .riscv64 => @import("../arch/riscv64/serial.zig"),
+    .loongarch64 => @import("../arch/loong64/serial.zig"),
+    .mips64el => @import("../arch/mips64el/serial.zig"),
+    else => @compileError("Unsupported architecture"),
+};
 
 pub const SyscallNumber = enum(u32) {
     sys_exit = 1,

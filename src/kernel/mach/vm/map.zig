@@ -1,11 +1,20 @@
 /// VM Map — manages the virtual address space for a Mach task.
 /// Each entry maps a contiguous virtual address range to a VM object + offset.
 
+const builtin = @import("builtin");
 const log = @import("../../../lib/log.zig");
 const SpinLock = @import("../../../lib/spinlock.zig").SpinLock;
 const vm_object = @import("object.zig");
 const pmm = @import("../../mm/pmm.zig");
-const paging = @import("../../arch/x86_64/paging.zig");
+
+const PAGE_SIZE: u64 = 4096;
+
+fn readPageTableBase() u64 {
+    if (builtin.cpu.arch == .x86_64) {
+        return @import("../../arch/x86_64/paging.zig").readCr3();
+    }
+    return 0;
+}
 
 pub const VMProt = packed struct(u8) {
     read: bool = false,
@@ -88,9 +97,9 @@ pub const VMMap = struct {
         self.lock.acquire();
         defer self.lock.release();
 
-        const aligned_size = alignUp(size, paging.PAGE_SIZE);
+        const aligned_size = alignUp(size, PAGE_SIZE);
         const start = if (addr_hint) |hint|
-            alignUp(hint, paging.PAGE_SIZE)
+            alignUp(hint, PAGE_SIZE)
         else
             self.findFreeRegion(aligned_size) orelse return null;
 
@@ -117,7 +126,7 @@ pub const VMMap = struct {
         self.lock.acquire();
         defer self.lock.release();
 
-        const end = addr + alignUp(size, paging.PAGE_SIZE);
+        const end = addr + alignUp(size, PAGE_SIZE);
         for (&self.entries) |*e| {
             if (!e.active) continue;
             if (e.start >= addr and e.end <= end) {
@@ -141,7 +150,7 @@ pub const VMMap = struct {
         const entry = self.lookup(fault_addr) orelse return false;
         const obj = entry.object orelse return false;
 
-        const page_offset = alignDown(fault_addr, paging.PAGE_SIZE) - entry.start;
+        const page_offset = alignDown(fault_addr, PAGE_SIZE) - entry.start;
         const phys = obj.fault(entry.offset + page_offset) orelse return false;
 
         _ = phys;
@@ -181,7 +190,7 @@ pub const VMMap = struct {
             for (&self.entries) |*e| {
                 if (!e.active) continue;
                 if (candidate < e.end and candidate + size > e.start) {
-                    candidate = alignUp(e.end, paging.PAGE_SIZE);
+                    candidate = alignUp(e.end, PAGE_SIZE);
                     conflict = true;
                     break;
                 }
@@ -220,6 +229,6 @@ pub fn getKernelMap() *VMMap {
 }
 
 pub fn initKernelMap() void {
-    kernel_map = VMMap.initWithPageTable(KERNEL_VM_BASE, KERNEL_VM_TOP, paging.readCr3());
+    kernel_map = VMMap.initWithPageTable(KERNEL_VM_BASE, KERNEL_VM_TOP, readPageTableBase());
     log.info("Kernel VM map: 0x{x} – 0x{x}", .{ KERNEL_VM_BASE, KERNEL_VM_TOP });
 }

@@ -58,6 +58,13 @@ BSD 层在 Mach 之上构建 POSIX 标准接口：
 | `iokit/registry.zig` | IORegistry 设备树 |
 | `iokit/service.zig` | IOService 基类 |
 | `iokit/drivers/pcie.zig` | PCIe 总线扫描驱动 |
+| `iokit/drivers/pit.zig` | PIT 8254 可编程间隔定时器（1000 Hz 系统时钟） |
+| `iokit/drivers/rtc.zig` | CMOS 实时时钟（BCD/BIN 自动转换、24 小时制） |
+| `iokit/drivers/keyboard.zig` | PS/2 键盘驱动（扫描码翻译、修饰键追踪、US QWERTY） |
+| `iokit/drivers/mouse.zig` | PS/2 鼠标驱动（3 字节数据包、绝对坐标、屏幕边界钳制） |
+| `iokit/drivers/framebuffer.zig` | UEFI GOP 帧缓冲显示驱动（像素级读写、矩形填充） |
+| `iokit/drivers/ata.zig` | ATA/IDE PIO 模式磁盘驱动（设备识别、扇区读写） |
+| `iokit/drivers/ac97.zig` | AC'97 音频编解码器驱动（初始化、音量控制） |
 
 ### 3.4 内存管理
 
@@ -75,6 +82,24 @@ BSD 层在 Mach 之上构建 POSIX 标准接口：
 | `arch/x86_64/idt.zig` | 中断描述符表（256 中断向量） |
 | `arch/x86_64/paging.zig` | 4 级页表管理 |
 | `arch/x86_64/serial.zig` | 串口驱动（调试输出） |
+| `arch/x86_64/pic.zig` | 8259 PIC 可编程中断控制器（IRQ 重映射至向量 32-47） |
+| `arch/x86_64/ports.zig` | 共享端口 I/O 原语（outb/inb/outw/inw/outl/inl/rdtsc） |
+
+### 3.6 桌面图形界面 (GUI)
+
+| 模块 | 说明 |
+|------|------|
+| `gui/desktop.zig` | 桌面合成器主模块，协调壁纸、窗口、菜单、Dock |
+| `gui/graphics.zig` | 2D 图形原语（矩形、圆角矩形、圆、直线、渐变、文字） |
+| `gui/window.zig` | 窗口管理器（macOS 风格标题栏、交通灯按钮、拖拽、Z 序） |
+| `gui/menubar.zig` | macOS 风格菜单栏（Apple 图标、应用名、菜单项、时钟） |
+| `gui/dock.zig` | macOS 风格 Dock 栏（应用图标、悬停效果、运行指示器） |
+| `gui/widgets.zig` | UI 组件库（按钮、标签、文本输入框） |
+| `gui/cursor.zig` | 鼠标光标渲染（标准箭头） |
+| `gui/icons.zig` | 系统图标数据（Apple、Finder、终端、设置、文件夹等） |
+| `gui/font.zig` | 8×16 VGA 位图字体（ASCII 32-126） |
+| `gui/color.zig` | 颜色类型、Alpha 混合、macOS 风格主题色板 |
+| `gui/event.zig` | GUI 事件类型与事件队列 |
 
 ## 4. 用户态组件
 
@@ -112,12 +137,15 @@ UEFI 固件
               ├── Phase 0: 串口初始化 + 日志系统
               ├── Phase 1: GDT + IDT 加载
               ├── Phase 2: 物理内存管理 (PMM + Buddy)
-              ├── Phase 3: 帧缓冲 + 启动画面
-              ├── Phase 4: 虚拟内存 (VM Map)
-              ├── Phase 5: Mach 子系统 (Task + Thread)
-              ├── Phase 6: BSD 层 (Syscall + VFS)
-              ├── Phase 7: I/O Kit
-              └── Phase 8: 进入空闲循环
+              ├── Phase 3: PIT 定时器 + RTC 时钟
+              ├── Phase 4: PS/2 键盘 + PS/2 鼠标
+              ├── Phase 5: GOP 帧缓冲显示
+              ├── Phase 6: 虚拟内存 (VM Map)
+              ├── Phase 7: Mach 子系统 (Task + Thread)
+              ├── Phase 8: BSD 层 (Syscall + VFS)
+              ├── Phase 9: I/O Kit + PCIe + ATA + AC97
+              ├── Phase 10: 桌面 GUI 初始化
+              └── 进入桌面事件轮询循环
 ```
 
 ## 6. 构建系统
@@ -139,13 +167,21 @@ ChimeraOS/
 ├── src/                   # 源代码
 │   ├── main.zig           # UEFI 引导入口
 │   ├── kernel/            # 内核层
-│   │   ├── main.zig       # 内核入口
-│   │   ├── arch/x86_64/   # x86_64 架构代码
+│   │   ├── main.zig       # 内核入口与初始化流程
+│   │   ├── arch/x86_64/   # x86_64 架构代码（GDT, IDT, PIC, Paging, Serial, Ports）
 │   │   ├── mach/          # Mach 微内核子系统
 │   │   ├── bsd/           # BSD POSIX 兼容层
 │   │   ├── iokit/         # I/O Kit 驱动框架
+│   │   │   └── drivers/   # 硬件驱动（PCIe, PIT, RTC, KBD, Mouse, FB, ATA, AC97）
 │   │   ├── mm/            # 内存管理
 │   │   └── lib/           # 内核内部库
+│   ├── gui/               # 桌面图形界面
+│   │   ├── desktop.zig    # 桌面合成器（主模块）
+│   │   ├── graphics.zig   # 2D 图形原语
+│   │   ├── window.zig     # 窗口管理器
+│   │   ├── menubar.zig    # macOS 风格菜单栏
+│   │   ├── dock.zig       # macOS 风格 Dock 栏
+│   │   └── ...            # 组件、光标、图标、字体、颜色、事件
 │   ├── loader/            # Mach-O 加载器
 │   │   └── macho/         # Mach-O 解析与段映射
 │   └── lib/               # 公共库（日志等）

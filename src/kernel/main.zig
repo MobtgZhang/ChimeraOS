@@ -1,11 +1,11 @@
 const std = @import("std");
 const uefi = std.os.uefi;
+const builtin = @import("builtin");
 
-// ── Architecture ──────────────────────────────────────────
-const gdt = @import("arch/x86_64/gdt.zig");
-const idt = @import("arch/x86_64/idt.zig");
-const serial = @import("arch/x86_64/serial.zig");
-const paging = @import("arch/x86_64/paging.zig");
+// ── Architecture (selected at compile time) ───────────────
+const arch = @import("arch/hal.zig");
+
+// x86_64-specific modules are now accessed through arch HAL
 
 // ── Memory Management ─────────────────────────────────────
 const pmm = @import("mm/pmm.zig");
@@ -36,12 +36,29 @@ pub const bsd_devfs = @import("bsd/vfs/devfs.zig");
 // ── I/O Kit ───────────────────────────────────────────────
 pub const iokit_registry = @import("iokit/registry.zig");
 pub const iokit_service = @import("iokit/service.zig");
-pub const iokit_pcie = @import("iokit/drivers/pcie.zig");
+pub const iokit_pcie = if (builtin.cpu.arch == .x86_64) @import("iokit/drivers/pcie.zig") else struct {
+    pub fn init() void {}
+};
+
+// ── Device Drivers (x86_64 PS/2 + ATA + AC97 are arch-specific) ──
+const is_x86 = builtin.cpu.arch == .x86_64;
+const keyboard = if (is_x86) @import("iokit/drivers/keyboard.zig") else @import("iokit/drivers/input_stub.zig");
+const mouse = if (is_x86) @import("iokit/drivers/mouse.zig") else @import("iokit/drivers/mouse_stub.zig");
+const framebuffer = @import("iokit/drivers/framebuffer.zig");
+const ata = if (is_x86) @import("iokit/drivers/ata.zig") else struct {
+    pub fn init() void {}
+};
+const ac97 = if (is_x86) @import("iokit/drivers/ac97.zig") else struct {
+    pub fn init() void {}
+};
 
 // ── Loader ────────────────────────────────────────────────
 pub const macho_parser = @import("../loader/macho/parser.zig");
 pub const macho_fat = @import("../loader/macho/fat.zig");
 pub const macho_segments = @import("../loader/macho/segments.zig");
+
+// ── GUI Desktop ───────────────────────────────────────────
+const desktop = @import("../gui/desktop.zig");
 
 // ── Boot Info Structures ──────────────────────────────────
 
@@ -62,23 +79,20 @@ pub const BootInfo = struct {
 // ── Kernel Entry Point ────────────────────────────────────
 
 pub fn kernelMain(boot_info: *const BootInfo) noreturn {
-    // Phase 0: Serial & logging
-    serial.init();
+    // ── Phase 0: Architecture init & logging ──────────────
+    arch.earlyInit();
     log.info("", .{});
     log.info("========================================", .{});
-    log.info("  ChimeraOS Z-Kernel v0.2.0", .{});
+    log.info("  ChimeraOS Z-Kernel v0.3.0", .{});
     log.info("  A macOS-compatible OS written in Zig", .{});
     log.info("========================================", .{});
     log.info("", .{});
+    log.info("[ARCH] {s}", .{arch.name});
 
-    // Phase 1: CPU tables
-    gdt.init();
-    log.info("[CPU]  GDT loaded (null + kernel CS/DS + user CS/DS)", .{});
+    // ── Phase 1: CPU tables & interrupt controller ─────────
+    arch.cpuInit();
 
-    idt.init();
-    log.info("[CPU]  IDT loaded (256 vectors)", .{});
-
-    // Phase 2: Physical memory
+    // ── Phase 2: Physical memory ──────────────────────────
     pmm.init(boot_info.memory_map);
     log.info("[MEM]  PMM: {} pages free ({} MB)", .{
         pmm.freePageCount(),
@@ -87,26 +101,29 @@ pub fn kernelMain(boot_info: *const BootInfo) noreturn {
 
     initBuddyZone();
 
-    // Phase 3: Framebuffer
+    // ── Phase 3: Hardware timers ──────────────────────────
+    arch.timerInit();
+
+    // ── Phase 4: Input devices ────────────────────────────
+    arch.inputInit(boot_info);
+
+    // ── Phase 5: Display ──────────────────────────────────
     if (boot_info.framebuffer) |fb| {
-        log.info("[GFX]  Framebuffer: {}x{} stride={} @ 0x{x}", .{
-            fb.width, fb.height, fb.stride, fb.base,
-        });
-        drawBootScreen(fb);
+        framebuffer.init(fb.base, fb.width, fb.height, fb.stride, fb.size);
     }
 
-    // Phase 4: Virtual memory
+    // ── Phase 6: Virtual memory ───────────────────────────
     mach_vm_map.initKernelMap();
     log.info("[VM]   Kernel VM map initialized", .{});
 
-    // Phase 5: Mach subsystem
+    // ── Phase 7: Mach subsystem ───────────────────────────
     mach_task.initKernelTask();
     log.info("[MACH] kernel_task created (PID 0)", .{});
 
     mach_thread.init();
     log.info("[MACH] Thread scheduler initialized", .{});
 
-    // Phase 6: BSD layer
+    // ── Phase 8: BSD layer ────────────────────────────────
     bsd_syscall.init();
     log.info("[BSD]  Syscall dispatch table ready ({} entries)", .{
         @typeInfo(bsd_syscall.SyscallNumber).@"enum".fields.len,
@@ -119,35 +136,111 @@ pub fn kernelMain(boot_info: *const BootInfo) noreturn {
     bsd_devfs.init();
     log.info("[VFS]  VFS + DevFS mounted (/dev/null, /dev/zero, /dev/console)", .{});
 
-    // Phase 7: I/O Kit
+    // ── Phase 9: I/O Kit & hardware detection ─────────────
     iokit_registry.init();
     iokit_service.init();
     log.info("[IOK]  IOKit registry and service manager ready", .{});
 
     iokit_pcie.init();
+    ata.init();
+    ac97.init();
 
-    // Phase 8: Summary
+    // ── Phase 10: Desktop GUI (with double buffering) ─────
+    if (boot_info.framebuffer) |fb| {
+        const fb_ptr: [*]volatile u32 = @ptrFromInt(fb.base);
+        desktop.init(fb_ptr, fb.width, fb.height, fb.stride);
+
+        // Allocate back buffer from PMM for double buffering
+        const buf_pixels = @as(usize, fb.stride) * fb.height;
+        const buf_bytes = buf_pixels * @sizeOf(u32);
+        const buf_pages = (buf_bytes + 4095) / 4096;
+        if (pmm.allocPages(buf_pages)) |start_page| {
+            const back_addr = pmm.pageToPhysical(start_page);
+            const back_ptr: [*]u32 = @ptrFromInt(back_addr);
+            @memset(back_ptr[0..buf_pixels], 0);
+            desktop.enableDoubleBuffer(back_ptr);
+            log.info("[GUI]  Double buffer enabled ({} KB)", .{buf_bytes / 1024});
+        } else {
+            log.warn("[GUI]  Double buffer allocation failed — direct rendering", .{});
+        }
+
+        const time = arch.readTime();
+        desktop.updateClock(time.hour, time.minute);
+
+        log.info("[GUI]  Desktop compositor initialized ({}x{})", .{ fb.width, fb.height });
+    }
+
+    // ── Boot summary ──────────────────────────────────────
     log.info("", .{});
     log.info("=== ChimeraOS Z-Kernel initialized ===", .{});
-    log.info("  Architecture : x86_64", .{});
+    log.info("  Architecture : {s}", .{arch.name});
     log.info("  Build        : {s}", .{
         if (@import("build_options").enable_logging) "Debug (logging ON)" else "Release (logging OFF)",
     });
     log.info("  Free memory  : {} MB", .{pmm.freePageCount() * 4096 / (1024 * 1024)});
     log.info("  Subsystems   : Mach IPC, VM, BSD, VFS, IOKit, Mach-O Loader", .{});
+    log.info("  GUI          : Desktop Compositor (double-buffered), Window Manager, Dock, Menu Bar", .{});
     log.info("", .{});
-    log.info("Entering idle loop.  Waiting for work.", .{});
+    log.info("Entering desktop event loop.", .{});
+
+    // ── Main event loop ───────────────────────────────────
+    var prev_left: bool = false;
+    var tick_counter: u64 = 0;
 
     while (true) {
+        // ── Poll keyboard ─────────────────────────────────
+        if (keyboard.poll()) |ev| {
+            if (ev.pressed and ev.ascii != 0) {
+                desktop.handleKeyPress(ev.ascii);
+                desktop.requestRedraw();
+            }
+        }
+
+        // ── Poll mouse ────────────────────────────────────
+        if (mouse.poll()) |mev| {
+            desktop.handleMouseMove(mev.x, mev.y);
+            desktop.requestRedraw();
+
+            if (mev.left and !prev_left) {
+                desktop.handleMouseDown(mev.x, mev.y);
+            }
+            if (!mev.left and prev_left) {
+                desktop.handleMouseUp(mev.x, mev.y);
+            }
+            prev_left = mev.left;
+        }
+
+        // ── Periodic tasks ────────────────────────────────
+        tick_counter +%= 1;
+        if (tick_counter % 50_000 == 0) {
+            arch.timerTick();
+            desktop.tick();
+
+            if (tick_counter % 500_000 == 0) {
+                const time = arch.readTime();
+                desktop.updateClock(time.hour, time.minute);
+                desktop.requestRedraw();
+            }
+        }
+
+        // ── Render (only when dirty, swap buffers atomically) ─
+        if (desktop.needsRedraw()) {
+            desktop.render();
+            const pos = mouse.getPosition();
+            desktop.drawCursor(pos.x, pos.y);
+            desktop.presentFrame();
+            desktop.clearRedrawFlag();
+        }
+
         mach_clock.processAlarms();
-        asm volatile ("hlt");
+        arch.cpuRelax();
     }
 }
 
 // ── Buddy Zone Initialisation ─────────────────────────────
 
 fn initBuddyZone() void {
-    const zone_order: u5 = 10; // 1024 pages = 4 MB
+    const zone_order: u5 = 10;
     if (pmm.allocPages(1024)) |start_page| {
         const base = pmm.pageToPhysical(start_page);
         buddy.init(base, 1024);
@@ -155,60 +248,5 @@ fn initBuddyZone() void {
     } else {
         log.warn("[MEM]  Not enough memory for buddy zone", .{});
         _ = zone_order;
-    }
-}
-
-// ── Boot Screen Drawing ───────────────────────────────────
-
-fn drawBootScreen(fb: FramebufferInfo) void {
-    const pixel_base: [*]volatile u32 = @ptrFromInt(fb.base);
-    const bg_color: u32 = 0x001E1E2E; // Catppuccin Mocha base
-    const accent: u32 = 0x0089B4FA; // blue accent
-    const text_bg: u32 = 0x00313244;
-
-    // Fill background
-    var y: u32 = 0;
-    while (y < fb.height) : (y += 1) {
-        var x: u32 = 0;
-        while (x < fb.width) : (x += 1) {
-            pixel_base[@as(usize, y) * fb.stride + x] = bg_color;
-        }
-    }
-
-    // Gradient accent bar at top (6 pixels)
-    y = 0;
-    while (y < @min(fb.height, 6)) : (y += 1) {
-        var x: u32 = 0;
-        while (x < fb.width) : (x += 1) {
-            pixel_base[@as(usize, y) * fb.stride + x] = accent;
-        }
-    }
-
-    // Center logo box (160x100)
-    const logo_w: u32 = 160;
-    const logo_h: u32 = 100;
-    if (fb.width > logo_w and fb.height > logo_h + 40) {
-        const cx = (fb.width - logo_w) / 2;
-        const cy = (fb.height - logo_h) / 2;
-        y = cy;
-        while (y < cy + logo_h) : (y += 1) {
-            var x: u32 = cx;
-            while (x < cx + logo_w) : (x += 1) {
-                const dx = x - cx;
-                const dy = y - cy;
-                const is_border = dx < 3 or dx >= logo_w - 3 or dy < 3 or dy >= logo_h - 3;
-                pixel_base[@as(usize, y) * fb.stride + x] = if (is_border) accent else text_bg;
-            }
-        }
-
-        // Bottom status bar
-        const bar_y = fb.height - 24;
-        var by: u32 = bar_y;
-        while (by < fb.height) : (by += 1) {
-            var bx: u32 = 0;
-            while (bx < fb.width) : (bx += 1) {
-                pixel_base[@as(usize, by) * fb.stride + bx] = text_bg;
-            }
-        }
     }
 }

@@ -2,6 +2,7 @@
 /// Each thread belongs to exactly one Task and carries its own kernel stack
 /// and saved CPU context for preemptive context switching.
 
+const builtin = @import("builtin");
 const log = @import("../../lib/log.zig");
 const SpinLock = @import("../../lib/spinlock.zig").SpinLock;
 const task_mod = @import("task.zig");
@@ -207,12 +208,10 @@ pub fn timerTick() void {
 }
 
 /// Low-level context switch.
-/// Saves callee-saved registers on the old stack, switches RSP,
-/// restores registers from the new stack and returns.
-fn contextSwitch(old_rsp: *u64, new_rsp: u64) void {
-    // On UEFI x86_64 target the Zig-internal ABI may differ from System V.
-    // This inline assembly manually handles register save/restore so it is
-    // ABI-agnostic: we simply save everything we need.
+/// Architecture-specific context switch.
+const contextSwitch = if (builtin.cpu.arch == .x86_64) contextSwitchX86 else contextSwitchStub;
+
+fn contextSwitchX86(old_rsp: *u64, new_rsp: u64) void {
     asm volatile (
         \\push %%rbp
         \\push %%rbx
@@ -222,9 +221,7 @@ fn contextSwitch(old_rsp: *u64, new_rsp: u64) void {
         \\push %%r15
         \\push %%rdi
         \\push %%rsi
-        // Save current RSP into *old_rsp
         \\mov %%rsp, (%[old])
-        // Load new RSP
         \\mov %[new], %%rsp
         \\pop %%rsi
         \\pop %%rdi
@@ -242,8 +239,11 @@ fn contextSwitch(old_rsp: *u64, new_rsp: u64) void {
     );
 }
 
+fn contextSwitchStub(_: *u64, _: u64) void {}
+
 fn idleEntry() void {
+    const arch_hal = @import("../arch/hal.zig");
     while (true) {
-        asm volatile ("hlt");
+        arch_hal.halt();
     }
 }
